@@ -1,0 +1,4 @@
+db.*
+media/
+**/__pycache__/
+**/migrations/
