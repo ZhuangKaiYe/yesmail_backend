@@ -1,3 +1,4 @@
+from django.utils import timezone
 from email.message import EmailMessage
 import email
 from email.header import decode_header
@@ -11,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework import status, permissions
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.core.files.base import ContentFile
-from mail.utils import decrypt, encrypt, send_smtp_email
+from mail.utils import decrypt, encrypt, safe_decode_header, send_smtp_email
 from .serializers import RegisterSerializer, LoginSerializer, EmailSerializer
 from django.contrib.auth import get_user_model
 from .models import Attachment, BoundEmailAccount, Email
@@ -288,22 +289,31 @@ class FetchExternalInboxView(APIView):
             fetched_uids = set(Email.objects.filter(
                 external_account=bound).values_list("external_uid", flat=True))
 
-            emails = []
             for mail_id in reversed(mail_ids):
                 uid = mail_id.decode()
                 if uid in fetched_uids:
-                    continue  # 跳过已保存的邮件
+                    continue
 
                 result, msg_data = imap.fetch(mail_id, "(RFC822)")
+                if not msg_data or not msg_data[0] or not msg_data[0][1]:
+                    continue  # 跳过无效邮件
+                
                 raw_email = msg_data[0][1]
                 msg = email.message_from_bytes(raw_email)
 
-                subject, _ = decode_header(msg["Subject"])[0]
-                subject = subject.decode() if isinstance(subject, bytes) else subject
-                from_ = msg.get("From")
-                date_ = parsedate_to_datetime(msg.get("Date"))
-                is_read = "\\Seen" in imap.fetch(
-                    mail_id, '(FLAGS)')[1][0].decode()
+                subject = safe_decode_header(msg["Subject"])
+                from_ = safe_decode_header(msg.get("From"))
+                date_str = msg.get("Date")
+                date_ = timezone.now()  # 默认值
+                if date_str:
+                    try:
+                        date_ = parsedate_to_datetime(date_str)
+                        if date_.tzinfo is None:  # 如果没有时区，补全 UTC
+                            date_ = date_.replace(tzinfo=timezone.utc)
+                    except Exception as e:
+                        print(f"⚠️ 解析日期失败: {date_str}, error: {e}")
+                flags = imap.fetch(mail_id, '(FLAGS)')[1][0].decode()
+                is_read = "\\Seen" in flags
 
                 body = ""
                 attachments = []
@@ -311,56 +321,61 @@ class FetchExternalInboxView(APIView):
                 if msg.is_multipart():
                     for part in msg.walk():
                         content_type = part.get_content_type()
-                        content_disposition = part.get("Content-Disposition")
-                        if content_type == "text/plain" and not content_disposition:
-                            body += part.get_payload(
-                                decode=True).decode(errors="ignore")
-                        elif "attachment" in str(content_disposition):
+                        content_disposition = str(
+                            part.get("Content-Disposition"))
+                        charset = part.get_content_charset() or 'utf-8'
+
+                        if content_type == "text/plain" and "attachment" not in content_disposition:
+                            try:
+                                body += part.get_payload(decode=True).decode(
+                                    charset, errors="ignore")
+                            except Exception:
+                                body += part.get_payload(decode=True).decode(
+                                    "utf-8", errors="ignore")
+                        elif "attachment" in content_disposition:
+                            # filename = safe_decode_header(part.get_filename()) or "unknown"
                             filename = part.get_filename()
                             if filename:
-                                filename = decode_header(filename)[0][0]
-                                filename = filename.decode() if isinstance(filename, bytes) else filename
-                                content = part.get_payload(decode=True)
-
-                                email_obj = Email.objects.create(
-                                    from_user=user,
-                                    to_external=from_,
-                                    subject=subject,
-                                    body=body,
-                                    is_internal=False,
-                                    is_read=is_read,
-                                    sent_at=date_,
-                                    external_uid=uid,
-                                    external_account=bound
-                                )
-                                att = Attachment(
-                                    email=email_obj,
-                                    filename=filename
-                                )
-                                att.file.save(filename, ContentFile(content))
-                                att.save()
+                                filename = safe_decode_header(filename)
+                            else:
+                                filename = "unknown"
+                            content = part.get_payload(decode=True)
+                            attachments.append((filename, content))
                 else:
-                    body = msg.get_payload(decode=True).decode(errors="ignore")
+                    charset = msg.get_content_charset() or 'utf-8'
+                    try:
+                        body = msg.get_payload(decode=True).decode(
+                            charset, errors="ignore")
+                    except Exception:
+                        body = msg.get_payload(decode=True).decode(
+                            "utf-8", errors="ignore")
 
-                    email_obj = Email.objects.create(
-                        from_user=user,
-                        to_external=from_,
-                        subject=subject,
-                        body=body,
-                        is_internal=False,
-                        is_read=is_read,
-                        sent_at=date_,
-                        external_uid=uid,
-                        external_account=bound
+                email_obj = Email.objects.create(
+                    from_user=user,
+                    from_external=from_,
+                    subject=subject,
+                    body=body,
+                    is_internal=False,
+                    is_read=is_read,
+                    sent_at=date_,
+                    external_uid=uid,
+                    external_account=bound
+                )
+
+                for filename, content in attachments:
+                    att = Attachment(
+                        email=email_obj,
+                        filename=filename
                     )
+                    att.file.save(filename, ContentFile(content))
+                    att.save()
 
             imap.logout()
 
+            # 查询并分页返回用户邮箱
             qs = Email.objects.filter(
                 from_user=user, is_internal=False).order_by('-sent_at')
-            limit = int(request.query_params.get("limit", 10))
-            offset = int(request.query_params.get("offset", 0))
-            emails = qs[offset:offset+limit]
+            emails = qs[offset:offset + limit]
             serializer = EmailSerializer(emails, many=True)
             return Response(serializer.data)
 

@@ -1,4 +1,5 @@
 import base64
+from email.header import decode_header
 from email.utils import formatdate, make_msgid
 import smtplib
 import mimetypes
@@ -47,3 +48,20 @@ def send_smtp_email(from_user_email, to_external, subject, body, attachments=Non
                 print(f"[info] Mail sent to {to_external} via local Postfix")
         except Exception as e:
             raise RuntimeError(f"邮件发送失败：{e}")
+
+
+
+def safe_decode_header(header_value):
+    if not header_value:
+        return ''
+    decoded_fragments = decode_header(header_value)
+    result = ''
+    for fragment, encoding in decoded_fragments:
+        if isinstance(fragment, bytes):
+            try:
+                result += fragment.decode(encoding or 'utf-8', errors='ignore')
+            except:
+                result += fragment.decode('utf-8', errors='ignore')
+        else:
+            result += fragment
+    return result

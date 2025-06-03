@@ -19,10 +19,11 @@ class Email(models.Model):
     recipients = models.ManyToManyField(
         settings.AUTH_USER_MODEL, related_name='received_emails')
     to_external = models.EmailField(null=True, blank=True)  # 外部收件人地址
+    from_external = models.CharField(max_length=255, blank=True, null=True)
     subject = models.CharField(max_length=255)
     body = models.TextField()
     is_internal = models.BooleanField(default=True)
-    sent_at = models.DateTimeField("sent at", auto_now_add=True)
+    sent_at = models.DateTimeField("sent at", null=True, blank=True)
     is_read = models.BooleanField(default=False)
 
     external_uid = models.CharField(
