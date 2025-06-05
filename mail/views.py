@@ -19,6 +19,8 @@ from .models import Attachment, BoundEmailAccount, Email
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from django.utils.timezone import now
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 User = get_user_model()
 
 
@@ -192,6 +194,17 @@ class SendEmailByPosifixView(APIView):
                 Attachment.objects.create(
                     email=email_obj, file=att_path, filename=filename)
 
+            channel_layer = get_channel_layer()
+            for user in internal_users:
+                async_to_sync(channel_layer.group_send)(
+                    f"user_{user.username}",  # 与 MailConsumer 中 group 名称对应
+                    {
+                        "type": "new_mail",
+                        "subject": subject,
+                        "from_email": request.user.email,
+                    }
+                )
+
         if external_emails:
             try:
                 send_smtp_email(
@@ -297,7 +310,7 @@ class FetchExternalInboxView(APIView):
                 result, msg_data = imap.fetch(mail_id, "(RFC822)")
                 if not msg_data or not msg_data[0] or not msg_data[0][1]:
                     continue  # 跳过无效邮件
-                
+
                 raw_email = msg_data[0][1]
                 msg = email.message_from_bytes(raw_email)
 
